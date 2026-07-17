@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>構図Lab — パース・配置検討</title>
+<style>
+  :root{
+    --bg:#1a1c20; --bar:#24262cee; --fg:#e8eaed; --sub:#9aa0a6;
+    --accent:#8ab4f8; --accent2:#3d5afe;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;height:100%;overflow:hidden;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,"Hiragino Sans",sans-serif;touch-action:none;}
+  canvas{display:block;}
+  #view{position:fixed;inset:0;}
+  /* ---- bars ---- */
+  .bar{position:fixed;left:0;right:0;z-index:20;display:flex;align-items:center;gap:8px;
+    padding:8px 10px;background:var(--bar);backdrop-filter:blur(8px);flex-wrap:wrap;}
+  #topbar{top:0;font-size:13px;}
+  #bottombar{bottom:0;justify-content:center;}
+  .bar label{display:flex;align-items:center;gap:4px;color:var(--sub);white-space:nowrap;}
+  button, select{
+    min-height:40px;padding:0 14px;border-radius:10px;border:1px solid #3a3f4a;
+    background:#2b2e36;color:var(--fg);font-size:14px;font-family:inherit;
+  }
+  button:active{background:#3a3f4a;}
+  button.primary{background:var(--accent2);border-color:var(--accent2);font-weight:600;}
+  button.toggled{background:var(--accent);color:#111;border-color:var(--accent);font-weight:600;}
+  button:disabled{opacity:.35;}
+  .seg{display:flex;border-radius:10px;overflow:hidden;border:1px solid #3a3f4a;}
+  .seg button{border:none;border-radius:0;min-width:56px;}
+  .seg button.on{background:var(--accent);color:#111;font-weight:600;}
+  input[type=range]{width:110px;}
+  .title{font-weight:700;color:var(--accent);margin-right:4px;}
+  #camH{min-width:52px;display:inline-block;color:var(--fg);}
+  /* ---- frame overlay ---- */
+  #frame{position:fixed;z-index:10;pointer-events:none;
+    border:1.5px solid rgba(255,255,255,.85);
+    box-shadow:0 0 0 100000px rgba(0,0,0,.45);}
+  #frame .t{position:absolute;left:0;right:0;border-top:1px solid rgba(255,255,255,.18);}
+  #frame .v{position:absolute;top:0;bottom:0;border-left:1px solid rgba(255,255,255,.18);}
+  /* ---- horizon ---- */
+  #overlay{position:fixed;inset:0;z-index:11;pointer-events:none;}
+  #toast{position:fixed;left:50%;bottom:84px;transform:translateX(-50%);z-index:30;
+    background:#000c;color:#fff;padding:10px 18px;border-radius:20px;font-size:13px;
+    opacity:0;transition:opacity .3s;pointer-events:none;max-width:90vw;text-align:center;}
+</style>
+</head>
+<body>
+<div id="view"></div>
+
+<svg id="overlay">
+  <line id="hline" x1="0" y1="-10" x2="0" y2="-10" stroke="#4dd0e1" stroke-width="1" stroke-dasharray="6 4" opacity=".8"/>
+  <text id="htext" x="0" y="-10" fill="#4dd0e1" font-size="11" opacity=".9">アイレベル</text>
+</svg>
+<div id="frame"><div class="t" style="top:33.33%"></div><div class="t" style="top:66.66%"></div>
+<div class="v" style="left:33.33%"></div><div class="v" style="left:66.66%"></div></div>
+
+<div id="topbar" class="bar">
+  <span class="title">構図Lab</span>
+  <label>画角 <input type="range" id="fov" min="15" max="100" value="50"><span id="fovVal">50°</span></label>
+  <label>カメラ高 <span id="camH">-</span></label>
+  <label>枠
+    <select id="aspect">
+      <option value="3,4">3:4 縦</option>
+      <option value="4,3" selected>4:3 横</option>
+      <option value="1,1">1:1</option>
+      <option value="9,16">9:16 縦</option>
+      <option value="16,9">16:9 横</option>
+      <option value="210,297">A4 縦</option>
+      <option value="297,210">A4 横</option>
+    </select>
+  </label>
+  <label>解像度
+    <select id="res"><option value="1000">1000px</option><option value="2000" selected>2000px</option><option value="3000">3000px</option></select>
+  </label>
+  <label><input type="checkbox" id="guidesExport" checked>ガイド込み</label>
+  <button class="primary" id="exportBtn">PNG書き出し</button>
+  <button id="resetBtn">リセット</button>
+</div>
+
+<div id="bottombar" class="bar">
+  <button id="addBox">＋箱</button>
+  <button id="addImg">＋画像</button>
+  <input type="file" id="imgFile" accept="image/png,image/jpeg" style="display:none">
+  <div class="seg">
+    <button id="mTranslate" class="on">移動</button>
+    <button id="mRotate">回転</button>
+    <button id="mScale">拡縮</button>
+  </div>
+  <button id="dupBtn" disabled>複製</button>
+  <button id="delBtn" disabled>削除</button>
+  <button id="lockBtn">カメラ固定</button>
+</div>
+
+<div id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/TransformControls.js"></script>
+<script>
+(function(){
+'use strict';
+var $ = function(id){ return document.getElementById(id); };
+
+/* ---------- renderer / scene ---------- */
+var renderer = new THREE.WebGLRenderer({antialias:true, preserveDrawingBuffer:true});
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.setClearColor(0x1a1c20);
+$('view').appendChild(renderer.domElement);
+
+var scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0x1a1c20, 40, 90);
+
+var camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.05, 500);
+camera.position.set(5, 2.0, 7);
+
+scene.add(new THREE.HemisphereLight(0xdde4ff, 0x3a3428, 0.9));
+var dl = new THREE.DirectionalLight(0xffffff, 0.55);
+dl.position.set(4, 8, 5);
+scene.add(dl);
+
+var ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(120,120).rotateX(-Math.PI/2),
+  new THREE.MeshLambertMaterial({color:0x24262c})
+);
+ground.position.y = -0.01;
+scene.add(ground);
+var grid = new THREE.GridHelper(60, 60, 0x5a6172, 0x363b46);
+scene.add(grid);
+
+/* ---------- controls ---------- */
+var orbit = new THREE.OrbitControls(camera, renderer.domElement);
+orbit.target.set(0, 1, 0);
+orbit.enableDamping = true;
+orbit.dampingFactor = 0.1;
+orbit.screenSpacePanning = true;
+orbit.maxPolarAngle = Math.PI * 0.98;
+orbit.touches = {ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN};
+
+var transform = new THREE.TransformControls(camera, renderer.domElement);
+transform.setSize(1.3);
+scene.add(transform);
+var cameraLocked = false, lastDragEnd = 0;
+transform.addEventListener('dragging-changed', function(e){
+  orbit.enabled = !e.value && !cameraLocked;
+  if(!e.value){ lastDragEnd = Date.now(); saveScene(); }
+});
+
+/* ---------- objects ---------- */
+var objects = [];   // selectable meshes
+var selected = null;
+var COLORS = [0x8ab4f8, 0xf28b82, 0xfdd663, 0x81c995, 0xc58af9, 0x78d9ec];
+var colorIdx = 0;
+
+function addBox(state){
+  var mesh = new THREE.Mesh(
+    new THREE.BoxGeometry(1,1,1),
+    new THREE.MeshLambertMaterial({color: COLORS[colorIdx++ % COLORS.length]})
+  );
+  var edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(mesh.geometry),
+    new THREE.LineBasicMaterial({color:0x111318})
+  );
+  edges.raycast = function(){};
+  mesh.add(edges);
+  mesh.userData.type = 'box';
+  if(state){
+    mesh.position.fromArray(state.p);
+    mesh.rotation.fromArray(state.r);
+    mesh.scale.fromArray(state.s);
+    if(state.c !== undefined) mesh.material.color.setHex(state.c);
+  }else{
+    mesh.position.set((Math.random()-0.5)*2, 0.5, (Math.random()-0.5)*2);
+  }
+  scene.add(mesh);
+  objects.push(mesh);
+  return mesh;
+}
+
+function addImagePlane(file){
+  var url = URL.createObjectURL(file);
+  new THREE.TextureLoader().load(url, function(tex){
+    tex.encoding = THREE.sRGBEncoding;
+    var ar = tex.image.width / tex.image.height;
+    var h = 1.6; // 身長160cm相当
+    var mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(1,1),
+      new THREE.MeshBasicMaterial({map:tex, transparent:true, side:THREE.DoubleSide})
+    );
+    mesh.scale.set(h*ar, h, 1);
+    mesh.position.set(0, h/2, 0);
+    mesh.userData.type = 'image';
+    scene.add(mesh);
+    objects.push(mesh);
+    select(mesh);
+    toast('画像を配置しました(高さ1.6m基準)');
+    URL.revokeObjectURL(url);
+  }, undefined, function(){ toast('画像を読み込めませんでした'); });
+}
+
+function select(mesh){
+  if(selected && selected.material.emissive) selected.material.emissive.setHex(0x000000);
+  selected = mesh;
+  if(mesh){
+    if(mesh.material.emissive) mesh.material.emissive.setHex(0x2a3d55);
+    transform.attach(mesh);
+  }else{
+    transform.detach();
+  }
+  $('dupBtn').disabled = $('delBtn').disabled = !mesh;
+}
+
+function removeObject(mesh){
+  var i = objects.indexOf(mesh);
+  if(i >= 0) objects.splice(i, 1);
+  scene.remove(mesh);
+  mesh.geometry.dispose();
+  if(mesh.material.map) mesh.material.map.dispose();
+  mesh.material.dispose();
+}
+
+/* ---------- tap select ---------- */
+var raycaster = new THREE.Raycaster();
+var downX = 0, downY = 0, moved = false;
+var el = renderer.domElement;
+el.addEventListener('pointerdown', function(e){ downX = e.clientX; downY = e.clientY; moved = false; });
+el.addEventListener('pointermove', function(e){
+  if(Math.abs(e.clientX-downX) > 6 || Math.abs(e.clientY-downY) > 6) moved = true;
+});
+el.addEventListener('pointerup', function(e){
+  if(moved || transform.dragging || Date.now() - lastDragEnd < 250) return;
+  var r = el.getBoundingClientRect();
+  var ndc = new THREE.Vector2(
+    ((e.clientX - r.left) / r.width) * 2 - 1,
+    -((e.clientY - r.top) / r.height) * 2 + 1
+  );
+  raycaster.setFromCamera(ndc, camera);
+  var hits = raycaster.intersectObjects(objects, false);
+  select(hits.length ? hits[0].object : null);
+});
+
+/* ---------- frame (canvas枠) ---------- */
+var frameRect = {x:0, y:0, w:100, h:100};
+function updateFrame(){
+  var a = $('aspect').value.split(',').map(Number);
+  var W = window.innerWidth, H = window.innerHeight;
+  var top = $('topbar').offsetHeight + 10, bottom = H - $('bottombar').offsetHeight - 10;
+  var availW = W - 36, availH = bottom - top;
+  var s = Math.min(availW / a[0], availH / a[1]);
+  frameRect.w = a[0] * s; frameRect.h = a[1] * s;
+  frameRect.x = (W - frameRect.w) / 2;
+  frameRect.y = top + (availH - frameRect.h) / 2;
+  var f = $('frame').style;
+  f.left = frameRect.x + 'px'; f.top = frameRect.y + 'px';
+  f.width = frameRect.w + 'px'; f.height = frameRect.h + 'px';
+}
+
+/* ---------- horizon (アイレベル) ---------- */
+var Y_AXIS = new THREE.Vector3(0,1,0);
+function horizonLine(){
+  var dir = new THREE.Vector3();
+  camera.getWorldDirection(dir);
+  var fh = new THREE.Vector3(dir.x, 0, dir.z);
+  if(fh.lengthSq() < 1e-6) return null;
+  fh.normalize();
+  var W = window.innerWidth, H = window.innerHeight;
+  function pt(ang){
+    var d = fh.clone().applyAxisAngle(Y_AXIS, ang);
+    var p = new THREE.Vector3(
+      camera.position.x + d.x * 1e4,
+      camera.position.y,
+      camera.position.z + d.z * 1e4
+    ).project(camera);
+    return {x:(p.x*0.5+0.5)*W, y:(-p.y*0.5+0.5)*H, z:p.z};
+  }
+  var p1 = pt(-0.35), p2 = pt(0.35);
+  if(!isFinite(p1.x) || !isFinite(p2.x) || p1.z > 1 || p2.z > 1) return null;
+  var dx = p2.x - p1.x;
+  if(Math.abs(dx) < 1e-3) return null;
+  var k = (p2.y - p1.y) / dx;
+  return {y0: p1.y - k*p1.x, y1: p1.y + k*(W - p1.x)};
+}
+function updateHorizon(){
+  var h = horizonLine();
+  var line = $('hline'), text = $('htext');
+  if(!h){ line.setAttribute('y1',-10); line.setAttribute('y2',-10); text.setAttribute('y',-10); return; }
+  line.setAttribute('x1', 0); line.setAttribute('y1', h.y0);
+  line.setAttribute('x2', window.innerWidth); line.setAttribute('y2', h.y1);
+  text.setAttribute('x', window.innerWidth - 74);
+  text.setAttribute('y', h.y1 - 6);
+}
+
+/* ---------- export ---------- */
+function exportPNG(){
+  var longSide = parseInt($('res').value, 10);
+  var withGuides = $('guidesExport').checked;
+  var W = window.innerWidth, H = window.innerHeight;
+  var s = longSide / Math.max(frameRect.w, frameRect.h);
+  var outW = Math.round(frameRect.w * s), outH = Math.round(frameRect.h * s);
+  var hl = withGuides ? horizonLine() : null;
+
+  var sel = selected;
+  if(sel) transform.detach();
+  if(!withGuides) grid.visible = false;
+
+  renderer.setPixelRatio(1);
+  renderer.setSize(outW, outH, false);
+  camera.setViewOffset(Math.round(W*s), Math.round(H*s), Math.round(frameRect.x*s), Math.round(frameRect.y*s), outW, outH);
+  renderer.render(scene, camera);
+  var url = renderer.domElement.toDataURL('image/png');
+
+  camera.clearViewOffset();
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(W, H, false);
+  grid.visible = true;
+  if(sel) transform.attach(sel);
+
+  var img = new Image();
+  img.onload = function(){
+    var c = document.createElement('canvas');
+    c.width = outW; c.height = outH;
+    var ctx = c.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    if(hl){
+      ctx.strokeStyle = '#4dd0e1'; ctx.lineWidth = Math.max(1, s);
+      ctx.setLineDash([8*s, 6*s]);
+      ctx.beginPath();
+      ctx.moveTo(0, (hl.y0 + (hl.y1-hl.y0) * (frameRect.x / W) - frameRect.y) * s);
+      ctx.lineTo(outW, (hl.y0 + (hl.y1-hl.y0) * ((frameRect.x+frameRect.w) / W) - frameRect.y) * s);
+      ctx.stroke();
+    }
+    c.toBlob(function(blob){
+      if(!blob){ toast('書き出しに失敗しました'); return; }
+      var file = new File([blob], 'kouzu_' + Date.now() + '.png', {type:'image/png'});
+      if(navigator.canShare && navigator.canShare({files:[file]})){
+        navigator.share({files:[file]}).catch(function(){ download(blob, file.name); });
+      }else{
+        download(blob, file.name);
+      }
+    }, 'image/png');
+  };
+  img.src = url;
+}
+function download(blob, name){
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+  toast('PNGを保存しました');
+}
+
+/* ---------- save / restore ---------- */
+var SAVE_KEY = 'kouzu-lab-v1';
+function saveScene(){
+  try{
+    var data = {
+      boxes: objects.filter(function(o){ return o.userData.type === 'box'; }).map(function(o){
+        return {p:o.position.toArray(), r:o.rotation.toArray().slice(0,3), s:o.scale.toArray(), c:o.material.color.getHex()};
+      }),
+      cam: {p:camera.position.toArray(), t:orbit.target.toArray(), fov:camera.fov},
+      aspect: $('aspect').value
+    };
+    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+  }catch(e){}
+}
+function restoreScene(){
+  try{
+    var raw = localStorage.getItem(SAVE_KEY);
+    if(!raw) return false;
+    var d = JSON.parse(raw);
+    (d.boxes || []).forEach(function(b){ addBox(b); });
+    if(d.cam){
+      camera.position.fromArray(d.cam.p);
+      orbit.target.fromArray(d.cam.t);
+      camera.fov = d.cam.fov;
+      camera.updateProjectionMatrix();
+      $('fov').value = Math.round(d.cam.fov);
+      $('fovVal').textContent = Math.round(d.cam.fov) + '°';
+    }
+    if(d.aspect) $('aspect').value = d.aspect;
+    return (d.boxes || []).length > 0;
+  }catch(e){ return false; }
+}
+setInterval(saveScene, 4000);
+
+/* ---------- UI ---------- */
+function toast(msg){
+  var t = $('toast');
+  t.textContent = msg;
+  t.style.opacity = 1;
+  clearTimeout(t._h);
+  t._h = setTimeout(function(){ t.style.opacity = 0; }, 2600);
+}
+$('addBox').addEventListener('click', function(){ select(addBox()); saveScene(); });
+$('addImg').addEventListener('click', function(){ $('imgFile').click(); });
+$('imgFile').addEventListener('change', function(e){
+  if(e.target.files[0]) addImagePlane(e.target.files[0]);
+  e.target.value = '';
+});
+$('dupBtn').addEventListener('click', function(){
+  if(!selected) return;
+  var copy;
+  if(selected.userData.type === 'box'){
+    copy = addBox({p:selected.position.toArray(), r:selected.rotation.toArray().slice(0,3),
+      s:selected.scale.toArray(), c:selected.material.color.getHex()});
+  }else{
+    copy = selected.clone();
+    copy.material = selected.material.clone();
+    scene.add(copy);
+    objects.push(copy);
+  }
+  copy.position.x += 0.5;
+  select(copy);
+  saveScene();
+});
+$('delBtn').addEventListener('click', function(){
+  if(!selected) return;
+  var m = selected;
+  select(null);
+  removeObject(m);
+  saveScene();
+});
+$('lockBtn').addEventListener('click', function(){
+  cameraLocked = !cameraLocked;
+  orbit.enabled = !cameraLocked;
+  this.classList.toggle('toggled', cameraLocked);
+  toast(cameraLocked ? 'カメラを固定しました(編集専用)' : 'カメラ操作を有効にしました');
+});
+[['mTranslate','translate'],['mRotate','rotate'],['mScale','scale']].forEach(function(pair){
+  $(pair[0]).addEventListener('click', function(){
+    transform.setMode(pair[1]);
+    ['mTranslate','mRotate','mScale'].forEach(function(id){ $(id).classList.toggle('on', id === pair[0]); });
+  });
+});
+$('fov').addEventListener('input', function(){
+  camera.fov = Number(this.value);
+  camera.updateProjectionMatrix();
+  $('fovVal').textContent = this.value + '°';
+});
+$('aspect').addEventListener('change', function(){ updateFrame(); saveScene(); });
+$('exportBtn').addEventListener('click', exportPNG);
+$('resetBtn').addEventListener('click', function(){
+  if(confirm('シーンを全て消去してリセットしますか?')){
+    localStorage.removeItem(SAVE_KEY);
+    location.reload();
+  }
+});
+window.addEventListener('resize', function(){
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  updateFrame();
+});
+
+/* ---------- init ---------- */
+if(!restoreScene()){
+  addBox({p:[0,0.5,0], r:[0,0,0], s:[1,1,1]});
+  addBox({p:[1.6,0.75,-1.2], r:[0,0.5,0], s:[1.2,1.5,1.2]});
+}
+updateFrame();
+toast('1本指: 回転・選択 / 2本指: ズーム・移動(上下でアイレベル調整)');
+
+function animate(){
+  requestAnimationFrame(animate);
+  orbit.update();
+  updateHorizon();
+  $('camH').textContent = camera.position.y.toFixed(2) + 'm';
+  renderer.render(scene, camera);
+}
+animate();
+})();
+</script>
+</body>
+</html>
